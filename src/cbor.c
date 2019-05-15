@@ -4,9 +4,11 @@
  * license that can be found in the LICENSE file.
  */
 
+#ifdef USE_OPENSSL
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
+#endif
 
 #include <string.h>
 #include "fido.h"
@@ -516,21 +518,6 @@ encode_assert_options(bool up, bool uv)
 }
 
 cbor_item_t *
-encode_pin_auth(const fido_blob_t *hmac_key, const fido_blob_t *data)
-{
-	const EVP_MD	*md = NULL;
-	unsigned char	 dgst[SHA256_DIGEST_LENGTH];
-	unsigned int	 dgst_len;
-
-	if ((md = EVP_sha256()) == NULL || HMAC(md, hmac_key->ptr,
-	    (int)hmac_key->len, data->ptr, (int)data->len, dgst,
-	    &dgst_len) == NULL || dgst_len != SHA256_DIGEST_LENGTH)
-		return (NULL);
-
-	return (cbor_build_bytestring(dgst, 16));
-}
-
-cbor_item_t *
 encode_pin_opt(void)
 {
 	return (cbor_build_uint8(1));
@@ -551,6 +538,22 @@ encode_pin_enc(const fido_blob_t *key, const fido_blob_t *pin)
 	return (item);
 }
 
+#ifdef USE_OPENSSL
+cbor_item_t *
+encode_pin_auth(const fido_blob_t *hmac_key, const fido_blob_t *data)
+{
+	const EVP_MD	*md = NULL;
+	unsigned char	 dgst[SHA256_DIGEST_LENGTH];
+	unsigned int	 dgst_len;
+
+	if ((md = EVP_sha256()) == NULL || HMAC(md, hmac_key->ptr,
+	    (int)hmac_key->len, data->ptr, (int)data->len, dgst,
+	    &dgst_len) == NULL || dgst_len != SHA256_DIGEST_LENGTH)
+		return (NULL);
+
+	return (cbor_build_bytestring(dgst, 16));
+}
+
 static int
 sha256(const unsigned char *data, size_t data_len, fido_blob_t *digest)
 {
@@ -568,6 +571,7 @@ sha256(const unsigned char *data, size_t data_len, fido_blob_t *digest)
 
 	return (0);
 }
+
 
 cbor_item_t *
 encode_change_pin_auth(const fido_blob_t *key, const fido_blob_t *new_pin,
@@ -688,6 +692,8 @@ fail:
 
 	return (item);
 }
+
+#endif
 
 cbor_item_t *
 encode_pin_hash_enc(const fido_blob_t *shared, const fido_blob_t *pin)
@@ -890,6 +896,7 @@ decode_attcred(const unsigned char **buf, size_t *len, int cose_alg,
 			log_debug("%s: es256_pk_decode", __func__);
 			goto fail;
 		}
+#if 0
 	} else if (attcred->type == COSE_RS256) {
 		if (rs256_pk_decode(item, &attcred->pubkey.rs256) < 0) {
 			log_debug("%s: rs256_pk_decode", __func__);
@@ -900,6 +907,7 @@ decode_attcred(const unsigned char **buf, size_t *len, int cose_alg,
 			log_debug("%s: eddsa_pk_decode", __func__);
 			goto fail;
 		}
+#endif
 	} else {
 		log_debug("%s: invalid cose_alg %d", __func__, attcred->type);
 		goto fail;
