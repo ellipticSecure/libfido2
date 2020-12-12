@@ -7,6 +7,7 @@
 #include <openssl/ec.h>
 #include <openssl/pem.h>
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,10 +16,9 @@
 #include <unistd.h>
 #endif
 
-#include "../openbsd-compat/openbsd-compat.h"
-
 #include "fido.h"
 #include "extern.h"
+#include "../openbsd-compat/openbsd-compat.h"
 
 static const unsigned char cdh[32] = {
 	0xf9, 0x64, 0x57, 0xe7, 0x2d, 0x97, 0xf6, 0xbb,
@@ -37,8 +37,8 @@ static const unsigned char user_id[32] = {
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: cred [-t ecdsa|rsa] [-k pubkey] [-ei cred_id] "
-	    "[-P pin] [-hruv] <device>\n");
+	fprintf(stderr, "usage: cred [-t ecdsa|rsa|eddsa] [-k pubkey] "
+	    "[-ei cred_id] [-P pin] [-T seconds] [-hruv] <device>\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -80,10 +80,13 @@ verify_cred(int type, const char *fmt, const unsigned char *authdata_ptr,
 	if (r != FIDO_OK)
 		errx(1, "fido_cred_set_extensions: %s (0x%x)", fido_strerr(r), r);
 
-	/* options */
-	r = fido_cred_set_options(cred, rk, uv);
-	if (r != FIDO_OK)
-		errx(1, "fido_cred_set_options: %s (0x%x)", fido_strerr(r), r);
+	/* resident key */
+	if (rk && (r = fido_cred_set_rk(cred, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_cred_set_rk: %s (0x%x)", fido_strerr(r), r);
+
+	/* user verification */
+	if (uv && (r = fido_cred_set_uv(cred, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_cred_set_uv: %s (0x%x)", fido_strerr(r), r);
 
 	/* x509 */
 	r = fido_cred_set_x509(cred, x509_ptr, x509_len);
@@ -110,10 +113,14 @@ verify_cred(int type, const char *fmt, const unsigned char *authdata_ptr,
 			if (write_ec_pubkey(key_out, fido_cred_pubkey_ptr(cred),
 			    fido_cred_pubkey_len(cred)) < 0)
 				errx(1, "write_ec_pubkey");
-		} else {
+		} else if (type == COSE_RS256) {
 			if (write_rsa_pubkey(key_out, fido_cred_pubkey_ptr(cred),
 			    fido_cred_pubkey_len(cred)) < 0)
 				errx(1, "write_rsa_pubkey");
+		} else if (type == COSE_EDDSA) {
+			if (write_eddsa_pubkey(key_out, fido_cred_pubkey_ptr(cred),
+			    fido_cred_pubkey_len(cred)) < 0)
+				errx(1, "write_eddsa_pubkey");
 		}
 	}
 
@@ -127,6 +134,27 @@ verify_cred(int type, const char *fmt, const unsigned char *authdata_ptr,
 	fido_cred_free(&cred);
 }
 
+static fido_dev_t *
+open_from_manifest(const fido_dev_info_t *dev_infos, size_t len,
+    const char *path)
+{
+	size_t i;
+	fido_dev_t *dev;
+
+	for (i = 0; i < len; i++) {
+		const fido_dev_info_t *curr = fido_dev_info_ptr(dev_infos, i);
+		if (path == NULL ||
+		    strcmp(path, fido_dev_info_path(curr)) == 0) {
+			dev = fido_dev_new_with_info(curr);
+			if (fido_dev_open_with_info(dev) == FIDO_OK)
+				return (dev);
+			fido_dev_free(&dev);
+		}
+	}
+
+	return (NULL);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -138,21 +166,36 @@ main(int argc, char **argv)
 	const char	*pin = NULL;
 	const char	*key_out = NULL;
 	const char	*id_out = NULL;
+	const char	*path = NULL;
 	unsigned char	*body = NULL;
+	long long	 seconds = 0;
 	size_t		 len;
 	int		 type = COSE_ES256;
 	int		 ext = 0;
 	int		 ch;
 	int		 r;
+	fido_dev_info_t	*dev_infos = NULL;
+	size_t		 dev_infos_len = 0;
 
 	if ((cred = fido_cred_new()) == NULL)
 		errx(1, "fido_cred_new");
 
-	while ((ch = getopt(argc, argv, "P:e:hi:k:rt:uv")) != -1) {
+	while ((ch = getopt(argc, argv, "P:T:e:hi:k:rt:uv")) != -1) {
 		switch (ch) {
 		case 'P':
 			pin = optarg;
 			break;
+		case 'T':
+#ifndef SIGNAL_EXAMPLE
+			(void)seconds;
+			errx(1, "-T not supported");
+#else
+			if (base10(optarg, &seconds) < 0)
+				errx(1, "base10: %s", optarg);
+			if (seconds <= 0 || seconds > 30)
+				errx(1, "-T: %s must be in (0,30]", optarg);
+			break;
+#endif
 		case 'e':
 			if (read_blob(optarg, &body, &len) < 0)
 				errx(1, "read_blob: %s", optarg);
@@ -180,6 +223,8 @@ main(int argc, char **argv)
 				type = COSE_ES256;
 			else if (strcmp(optarg, "rsa") == 0)
 				type = COSE_RS256;
+			else if (strcmp(optarg, "eddsa") == 0)
+				type = COSE_EDDSA;
 			else
 				errx(1, "unknown type %s", optarg);
 			break;
@@ -194,19 +239,21 @@ main(int argc, char **argv)
 		}
 	}
 
+	fido_init(0);
+
 	argc -= optind;
 	argv += optind;
 
-	if (argc != 1)
+	if (argc > 1)
 		usage();
+	dev_infos = fido_dev_info_new(16);
+	fido_dev_info_manifest(dev_infos, 16, &dev_infos_len);
+	if (argc == 1)
+		path = argv[0];
 
-	fido_init(0);
+	if ((dev = open_from_manifest(dev_infos, dev_infos_len, path)) == NULL)
+		errx(1, "open_from_manifest");
 
-	if ((dev = fido_dev_new()) == NULL)
-		errx(1, "fido_dev_new");
-
-	if ((r = fido_dev_open(dev, argv[0])) != FIDO_OK)
-		errx(1, "fido_dev_open: %s (0x%x)", fido_strerr(r), r);
 	if (u2f)
 		fido_dev_force_u2f(dev);
 
@@ -237,19 +284,40 @@ main(int argc, char **argv)
 	if (r != FIDO_OK)
 		errx(1, "fido_cred_set_extensions: %s (0x%x)", fido_strerr(r), r);
 
-	/* options */
-	r = fido_cred_set_options(cred, rk, uv);
-	if (r != FIDO_OK)
-		errx(1, "fido_cred_set_options: %s (0x%x)", fido_strerr(r), r);
+	/* resident key */
+	if (rk && (r = fido_cred_set_rk(cred, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_cred_set_rk: %s (0x%x)", fido_strerr(r), r);
+
+	/* user verification */
+	if (uv && (r = fido_cred_set_uv(cred, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_cred_set_uv: %s (0x%x)", fido_strerr(r), r);
+
+#ifdef SIGNAL_EXAMPLE
+	prepare_signal_handler(SIGINT);
+	if (seconds) {
+		prepare_signal_handler(SIGALRM);
+		alarm((unsigned)seconds);
+	}
+#endif
 
 	r = fido_dev_make_cred(dev, cred, pin);
-	if (r != FIDO_OK)
+	if (r != FIDO_OK) {
+#ifdef SIGNAL_EXAMPLE
+		if (got_signal)
+			fido_dev_cancel(dev);
+#endif
 		errx(1, "fido_makecred: %s (0x%x)", fido_strerr(r), r);
+	}
+
 	r = fido_dev_close(dev);
 	if (r != FIDO_OK)
 		errx(1, "fido_dev_close: %s (0x%x)", fido_strerr(r), r);
 
 	fido_dev_free(&dev);
+
+	/* when verifying, pin implies uv */
+	if (pin)
+		uv = true;
 
 	verify_cred(type, fido_cred_fmt(cred), fido_cred_authdata_ptr(cred),
 	    fido_cred_authdata_len(cred), fido_cred_x5c_ptr(cred),

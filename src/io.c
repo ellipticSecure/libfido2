@@ -20,11 +20,11 @@ struct frame {
 			uint8_t cmd;
 			uint8_t bcnth;
 			uint8_t bcntl;
-			uint8_t data[CTAP_RPT_SIZE - 7];
+			uint8_t data[CTAP_MAX_REPORT_LEN - CTAP_INIT_HEADER_LEN];
 		} init;
 		struct {
 			uint8_t seq;
-			uint8_t data[CTAP_RPT_SIZE - 5];
+			uint8_t data[CTAP_MAX_REPORT_LEN - CTAP_CONT_HEADER_LEN];
 		} cont;
 	} body;
 })
@@ -33,92 +33,117 @@ struct frame {
 #define MIN(x, y) ((x) > (y) ? (y) : (x))
 #endif
 
-static size_t
-tx_preamble(fido_dev_t *d,  uint8_t cmd, const void *buf, size_t count)
-{
-	struct frame	*fp;
-	unsigned char	pkt[sizeof(*fp) + 1];
-	int		n;
-
-	if (d->io.write == NULL || (cmd & 0x80) == 0)
-		return (0);
-
-	memset(&pkt, 0, sizeof(pkt));
-	fp = (struct frame *)(pkt + 1);
-	fp->cid = d->cid;
-	fp->body.init.cmd = 0x80 | cmd;
-	fp->body.init.bcnth = (count >> 8) & 0xff;
-	fp->body.init.bcntl = count & 0xff;
-	count = MIN(count, sizeof(fp->body.init.data));
-	memcpy(&fp->body.init.data, buf, count);
-
-	n = d->io.write(d->io_handle, pkt, sizeof(pkt));
-	if (n < 0 || (size_t)n != sizeof(pkt))
-		return (0);
-
-	return (count);
-}
-
-static size_t
-tx_frame(fido_dev_t *d, int seq, const void *buf, size_t count)
+static int
+tx_empty(fido_dev_t *d, uint8_t cmd)
 {
 	struct frame	*fp;
 	unsigned char	 pkt[sizeof(*fp) + 1];
+	const size_t	 len = d->tx_len + 1;
 	int		 n;
 
-	if (d->io.write == NULL || seq < 0 || seq > UINT8_MAX)
+	memset(&pkt, 0, sizeof(pkt));
+	fp = (struct frame *)(pkt + 1);
+	fp->cid = d->cid;
+	fp->body.init.cmd = CTAP_FRAME_INIT | cmd;
+
+	if (len > sizeof(pkt) || (n = d->io.write(d->io_handle, pkt,
+	    len)) < 0 || (size_t)n != len)
+		return (-1);
+
+	return (0);
+}
+
+static size_t
+tx_preamble(fido_dev_t *d, uint8_t cmd, const void *buf, size_t count)
+{
+	struct frame	*fp;
+	unsigned char	 pkt[sizeof(*fp) + 1];
+	const size_t	 len = d->tx_len + 1;
+	int		 n;
+
+	if (d->tx_len - CTAP_INIT_HEADER_LEN > sizeof(fp->body.init.data))
 		return (0);
 
 	memset(&pkt, 0, sizeof(pkt));
 	fp = (struct frame *)(pkt + 1);
 	fp->cid = d->cid;
-	fp->body.cont.seq = (uint8_t)seq;
-	count = MIN(count, sizeof(fp->body.cont.data));
-	memcpy(&fp->body.cont.data, buf, count);
+	fp->body.init.cmd = CTAP_FRAME_INIT | cmd;
+	fp->body.init.bcnth = (count >> 8) & 0xff;
+	fp->body.init.bcntl = count & 0xff;
+	count = MIN(count, d->tx_len - CTAP_INIT_HEADER_LEN);
+	memcpy(&fp->body.init.data, buf, count);
 
-	n = d->io.write(d->io_handle, pkt, sizeof(pkt));
-	if (n < 0 || (size_t)n != sizeof(pkt))
+	if (len > sizeof(pkt) || (n = d->io.write(d->io_handle, pkt,
+	    len)) < 0 || (size_t)n != len)
 		return (0);
 
 	return (count);
 }
 
-int
-tx(fido_dev_t *d, uint8_t cmd, const void *buf, size_t count)
+static size_t
+tx_frame(fido_dev_t *d, uint8_t seq, const void *buf, size_t count)
 {
-	int	seq = 0;
-	size_t	sent;
+	struct frame	*fp;
+	unsigned char	 pkt[sizeof(*fp) + 1];
+	const size_t	 len = d->tx_len + 1;
+	int		 n;
 
-	log_debug("%s: d=%p, cmd=0x%02x, buf=%p, count=%zu", __func__,
-	    (void *)d, cmd, buf, count);
-	log_xxd(buf, count);
+	if (d->tx_len - CTAP_CONT_HEADER_LEN > sizeof(fp->body.cont.data))
+		return (0);
 
-	if (d->io_handle == NULL || count > UINT16_MAX) {
-		log_debug("%s: invalid argument (%p, %zu)", __func__,
-		    d->io_handle, count);
-		return (-1);
-	}
+	memset(&pkt, 0, sizeof(pkt));
+	fp = (struct frame *)(pkt + 1);
+	fp->cid = d->cid;
+	fp->body.cont.seq = seq;
+	count = MIN(count, d->tx_len - CTAP_CONT_HEADER_LEN);
+	memcpy(&fp->body.cont.data, buf, count);
+
+	if (len > sizeof(pkt) || (n = d->io.write(d->io_handle, pkt,
+	    len)) < 0 || (size_t)n != len)
+		return (0);
+
+	return (count);
+}
+
+static int
+tx(fido_dev_t *d, uint8_t cmd, const unsigned char *buf, size_t count)
+{
+	size_t n, sent;
 
 	if ((sent = tx_preamble(d, cmd, buf, count)) == 0) {
-		log_debug("%s: tx_preamble", __func__);
+		fido_log_debug("%s: tx_preamble", __func__);
 		return (-1);
 	}
 
-	while (sent < count) {
+	for (uint8_t seq = 0; sent < count; sent += n) {
 		if (seq & 0x80) {
-			log_debug("%s: seq & 0x80", __func__);
+			fido_log_debug("%s: seq & 0x80", __func__);
 			return (-1);
 		}
-		const uint8_t *p = (const uint8_t *)buf + sent;
-		size_t n = tx_frame(d, seq++, p, count - sent);
-		if (n == 0) {
-			log_debug("%s: tx_frame", __func__);
+		if ((n = tx_frame(d, seq++, buf + sent, count - sent)) == 0) {
+			fido_log_debug("%s: tx_frame", __func__);
 			return (-1);
 		}
-		sent += n;
 	}
 
 	return (0);
+}
+
+int
+fido_tx(fido_dev_t *d, uint8_t cmd, const void *buf, size_t count)
+{
+	fido_log_debug("%s: d=%p, cmd=0x%02x, buf=%p, count=%zu", __func__,
+	    (void *)d, cmd, (const void *)buf, count);
+	fido_log_xxd(buf, count);
+
+	if (d->transport.tx != NULL)
+		return (d->transport.tx(d, cmd, buf, count));
+	if (d->io_handle == NULL || d->io.write == NULL || count > UINT16_MAX) {
+		fido_log_debug("%s: invalid argument", __func__);
+		return (-1);
+	}
+
+	return (count == 0 ? tx_empty(d, cmd) : tx(d, cmd, buf, count));
 }
 
 static int
@@ -126,18 +151,17 @@ rx_frame(fido_dev_t *d, struct frame *fp, int ms)
 {
 	int n;
 
-	if (d->io.read == NULL)
-		return (-1);
+	memset(fp, 0, sizeof(*fp));
 
-	n = d->io.read(d->io_handle, (unsigned char *)fp, sizeof(*fp), ms);
-	if (n < 0 || (size_t)n != sizeof(*fp))
+	if (d->rx_len > sizeof(*fp) || (n = d->io.read(d->io_handle,
+	    (unsigned char *)fp, d->rx_len, ms)) < 0 || (size_t)n != d->rx_len)
 		return (-1);
 
 	return (0);
 }
 
 static int
-rx_preamble(fido_dev_t *d, struct frame *fp, int ms)
+rx_preamble(fido_dev_t *d, uint8_t cmd, struct frame *fp, int ms)
 {
 	do {
 		if (rx_frame(d, fp, ms) < 0)
@@ -148,92 +172,129 @@ rx_preamble(fido_dev_t *d, struct frame *fp, int ms)
 	} while (fp->cid == d->cid &&
 	    fp->body.init.cmd == (CTAP_FRAME_INIT | CTAP_KEEPALIVE));
 
+	if (d->rx_len > sizeof(*fp))
+		return (-1);
+
+	fido_log_debug("%s: initiation frame at %p", __func__, (void *)fp);
+	fido_log_xxd(fp, d->rx_len);
+
+#ifdef FIDO_FUZZ
+	fp->body.init.cmd = (CTAP_FRAME_INIT | cmd);
+#endif
+
+	if (fp->cid != d->cid || fp->body.init.cmd != (CTAP_FRAME_INIT | cmd)) {
+		fido_log_debug("%s: cid (0x%x, 0x%x), cmd (0x%02x, 0x%02x)",
+		    __func__, fp->cid, d->cid, fp->body.init.cmd, cmd);
+		return (-1);
+	}
+
 	return (0);
 }
 
-int
-rx(fido_dev_t *d, uint8_t cmd, void *buf, size_t count, int ms)
+static int
+rx(fido_dev_t *d, uint8_t cmd, unsigned char *buf, size_t count, int ms)
 {
-	struct frame	f;
-	uint16_t	r;
-	uint16_t	flen;
-	int		seq;
+	struct frame f;
+	size_t r, payload_len, init_data_len, cont_data_len;
 
-	if (d->io_handle == NULL || (cmd & 0x80) == 0) {
-		log_debug("%s: invalid argument (%p, 0x%02x)", __func__,
-		    d->io_handle, cmd);
+	if (d->rx_len <= CTAP_INIT_HEADER_LEN ||
+	    d->rx_len <= CTAP_CONT_HEADER_LEN)
+		return (-1);
+
+	init_data_len = d->rx_len - CTAP_INIT_HEADER_LEN;
+	cont_data_len = d->rx_len - CTAP_CONT_HEADER_LEN;
+
+	if (init_data_len > sizeof(f.body.init.data) ||
+	    cont_data_len > sizeof(f.body.cont.data))
+		return (-1);
+
+	if (rx_preamble(d, cmd, &f, ms) < 0) {
+		fido_log_debug("%s: rx_preamble", __func__);
 		return (-1);
 	}
 
-	if (rx_preamble(d, &f, ms) < 0) {
-		log_debug("%s: rx_preamble", __func__);
+	payload_len = (size_t)((f.body.init.bcnth << 8) | f.body.init.bcntl);
+	fido_log_debug("%s: payload_len=%zu", __func__, payload_len);
+
+	if (count < payload_len) {
+		fido_log_debug("%s: count < payload_len", __func__);
 		return (-1);
 	}
 
-	log_debug("%s: initiation frame at %p, len %zu", __func__, (void *)&f,
-	    sizeof(f));
-	log_xxd(&f, sizeof(f));
-
-#ifdef FIDO_FUZZ
-	f.cid = d->cid;
-	f.body.init.cmd = cmd;
-#endif
-
-	if (f.cid != d->cid || f.body.init.cmd != cmd) {
-		log_debug("%s: cid (0x%x, 0x%x), cmd (0x%02x, 0x%02x)",
-		    __func__, f.cid, d->cid, f.body.init.cmd, cmd);
-		return (-1);
+	if (payload_len < init_data_len) {
+		memcpy(buf, f.body.init.data, payload_len);
+		return ((int)payload_len);
 	}
 
-	flen = (f.body.init.bcnth << 8) | f.body.init.bcntl;
-	if (count < (size_t)flen) {
-		log_debug("%s: count < flen (%zu, %zu)", __func__, count,
-		    (size_t)flen);
-		return (-1);
-	}
-	if (flen < sizeof(f.body.init.data)) {
-		memcpy(buf, f.body.init.data, flen);
-		return (flen);
-	}
+	memcpy(buf, f.body.init.data, init_data_len);
+	r = init_data_len;
 
-	memcpy(buf, f.body.init.data, sizeof(f.body.init.data));
-	r = sizeof(f.body.init.data);
-	seq = 0;
-
-	while ((size_t)r < flen) {
+	for (int seq = 0; r < payload_len; seq++) {
 		if (rx_frame(d, &f, ms) < 0) {
-			log_debug("%s: rx_frame", __func__);
+			fido_log_debug("%s: rx_frame", __func__);
 			return (-1);
 		}
 
-		log_debug("%s: continuation frame at %p, len %zu", __func__,
-		    (void *)&f, sizeof(f));
-		log_xxd(&f, sizeof(f));
+		fido_log_debug("%s: continuation frame at %p", __func__,
+		    (void *)&f);
+		fido_log_xxd(&f, d->rx_len);
 
 #ifdef FIDO_FUZZ
 		f.cid = d->cid;
-		f.body.cont.seq = seq;
+		f.body.cont.seq = (uint8_t)seq;
 #endif
 
-		if (f.cid != d->cid || f.body.cont.seq != seq++) {
-			log_debug("%s: cid (0x%x, 0x%x), seq (%d, %d)",
+		if (f.cid != d->cid || f.body.cont.seq != seq) {
+			fido_log_debug("%s: cid (0x%x, 0x%x), seq (%d, %d)",
 			    __func__, f.cid, d->cid, f.body.cont.seq, seq);
 			return (-1);
 		}
 
-		uint8_t *p = (uint8_t *)buf + r;
-
-		if ((size_t)(flen - r) > sizeof(f.body.cont.data)) {
-			memcpy(p, f.body.cont.data, sizeof(f.body.cont.data));
-			r += sizeof(f.body.cont.data);
+		if (payload_len - r > cont_data_len) {
+			memcpy(buf + r, f.body.cont.data, cont_data_len);
+			r += cont_data_len;
 		} else {
-			memcpy(p, f.body.cont.data, flen - r);
-			r += (flen - r); /* break */
+			memcpy(buf + r, f.body.cont.data, payload_len - r);
+			r += payload_len - r; /* break */
 		}
 	}
 
-	log_debug("%s: payload at %p, len %zu", __func__, buf, (size_t)r);
-	log_xxd(buf, r);
+	return ((int)r);
+}
 
-	return (r);
+int
+fido_rx(fido_dev_t *d, uint8_t cmd, void *buf, size_t count, int ms)
+{
+	int n;
+
+	fido_log_debug("%s: d=%p, cmd=0x%02x, buf=%p, count=%zu, ms=%d",
+	    __func__, (void *)d, cmd, (const void *)buf, count, ms);
+
+	if (d->transport.rx != NULL)
+		return (d->transport.rx(d, cmd, buf, count, ms));
+	if (d->io_handle == NULL || d->io.read == NULL || count > UINT16_MAX) {
+		fido_log_debug("%s: invalid argument", __func__);
+		return (-1);
+	}
+	if ((n = rx(d, cmd, buf, count, ms)) >= 0) {
+		fido_log_debug("%s: buf=%p, len=%d", __func__, (void *)buf, n);
+		fido_log_xxd(buf, (size_t)n);
+	}
+
+	return (n);
+}
+
+int
+fido_rx_cbor_status(fido_dev_t *d, int ms)
+{
+	unsigned char	reply[FIDO_MAXMSG];
+	int		reply_len;
+
+	if ((reply_len = fido_rx(d, CTAP_CMD_CBOR, &reply, sizeof(reply),
+	    ms)) < 0 || (size_t)reply_len < 1) {
+		fido_log_debug("%s: fido_rx", __func__);
+		return (FIDO_ERR_RX);
+	}
+
+	return (reply[0]);
 }

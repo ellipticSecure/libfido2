@@ -8,10 +8,12 @@ list(APPEND FIDO_SOURCES
 	aes256.c
 	assert.c
 	authkey.c
+	bio.c
 	blob.c
 	buf.c
 	cbor.c
 	cred.c
+	credman.c
 	dev.c
 	ecdh.c
 	eddsa.c
@@ -28,12 +30,29 @@ list(APPEND FIDO_SOURCES
 	u2f.c
 )
 
-if(WIN32)
-	list(APPEND COMPAT_SOURCES hid_win.c)
+if(FUZZ)
+	list(APPEND FIDO_SOURCES ../fuzz/prng.c)
+	list(APPEND FIDO_SOURCES ../fuzz/uniform_random.c)
+	list(APPEND FIDO_SOURCES ../fuzz/wrap.c)
+endif()
+
+if(USE_HIDAPI)
+	list(APPEND FIDO_SOURCES hid_hidapi.c)
+elseif(WIN32)
+	list(APPEND FIDO_SOURCES hid_win.c)
 elseif(APPLE)
-	list(APPEND COMPAT_SOURCES hid_osx.c)
+	list(APPEND FIDO_SOURCES hid_osx.c)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-	list(APPEND COMPAT_SOURCES hid_linux.c)
+	list(APPEND FIDO_SOURCES hid_linux.c)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
+	list(APPEND FIDO_SOURCES hid_openbsd.c)
+else()
+	message(FATAL_ERROR "please define a hid backend for your platform")
+endif()
+
+if(NOT MSVC)
+	set_source_files_properties(${FIDO_SOURCES} PROPERTIES COMPILE_FLAGS
+	    "-Wconversion -Wsign-conversion")
 endif()
 
 list(APPEND COMPAT_SOURCES
@@ -41,18 +60,14 @@ list(APPEND COMPAT_SOURCES
 	../openbsd-compat/explicit_bzero.c
 	../openbsd-compat/explicit_bzero_win32.c
 	../openbsd-compat/recallocarray.c
+	../openbsd-compat/strlcat.c
 	../openbsd-compat/timingsafe_bcmp.c
 )
-
-# /dev/urandom
-if(UNIX)
-	add_definitions(-DHAS_DEV_URANDOM)
-endif()
 
 # static library
 add_library(fido2 STATIC ${FIDO_SOURCES} ${COMPAT_SOURCES})
 target_link_libraries(fido2 ${CBOR_LIBRARIES} ${CRYPTO_LIBRARIES}
-	${UDEV_LIBRARIES})
+	${UDEV_LIBRARIES} ${BASE_LIBRARIES} ${HIDAPI_LIBRARIES})
 if(WIN32)
 	if (MINGW)
 		target_link_libraries(fido2 wsock32 ws2_32 bcrypt setupapi hid)
@@ -70,7 +85,7 @@ install(TARGETS fido2 ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 # dynamic library
 add_library(fido2_shared SHARED ${FIDO_SOURCES} ${COMPAT_SOURCES})
 target_link_libraries(fido2_shared ${CBOR_LIBRARIES} ${CRYPTO_LIBRARIES}
-	${UDEV_LIBRARIES})
+	${UDEV_LIBRARIES} ${BASE_LIBRARIES} ${HIDAPI_LIBRARIES})
 if(WIN32)
 	if (MINGW)
 		target_link_libraries(fido2_shared wsock32 ws2_32 bcrypt

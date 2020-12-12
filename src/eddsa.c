@@ -23,6 +23,8 @@ EVP_PKEY_new_raw_public_key(int type, ENGINE *e, const unsigned char *key,
 	(void)key;
 	(void)keylen;
 
+	fido_log_debug("%s: unimplemented", __func__);
+
 	return (NULL);
 }
 
@@ -33,6 +35,8 @@ EVP_PKEY_get_raw_public_key(const EVP_PKEY *pkey, unsigned char *pub,
 	(void)pkey;
 	(void)pub;
 	(void)len;
+
+	fido_log_debug("%s: unimplemented", __func__);
 
 	return (0);
 }
@@ -47,6 +51,8 @@ EVP_DigestVerify(EVP_MD_CTX *ctx, const unsigned char *sigret, size_t siglen,
 	(void)tbs;
 	(void)tbslen;
 
+	fido_log_debug("%s: unimplemented", __func__);
+
 	return (0);
 }
 #endif /* LIBRESSL_VERSION_NUMBER || OPENSSL_VERSION_NUMBER < 0x10101000L */
@@ -55,6 +61,8 @@ EVP_DigestVerify(EVP_MD_CTX *ctx, const unsigned char *sigret, size_t siglen,
 EVP_MD_CTX *
 EVP_MD_CTX_new(void)
 {
+	fido_log_debug("%s: unimplemented", __func__);
+
 	return (NULL);
 }
 
@@ -71,7 +79,7 @@ decode_coord(const cbor_item_t *item, void *xy, size_t xy_len)
 	if (cbor_isa_bytestring(item) == false ||
 	    cbor_bytestring_is_definite(item) == false ||
 	    cbor_bytestring_length(item) != xy_len) {
-		log_debug("%s: cbor type", __func__);
+		fido_log_debug("%s: cbor type", __func__);
 		return (-1);
 	}
 
@@ -103,48 +111,11 @@ eddsa_pk_decode(const cbor_item_t *item, eddsa_pk_t *k)
 	if (cbor_isa_map(item) == false ||
 	    cbor_map_is_definite(item) == false ||
 	    cbor_map_iter(item, k, decode_pubkey_point) < 0) {
-		log_debug("%s: cbor type", __func__);
+		fido_log_debug("%s: cbor type", __func__);
 		return (-1);
 	}
 
 	return (0);
-}
-
-cbor_item_t *
-eddsa_pk_encode(const eddsa_pk_t *pk)
-{
-	cbor_item_t		*item = NULL;
-	struct cbor_pair	 pair;
-
-	if ((item = cbor_new_definite_map(4)) == NULL)
-		goto fail;
-
-	pair.key = cbor_move(cbor_build_uint8(1));
-	pair.value = cbor_move(cbor_build_uint8(1));
-	if (!cbor_map_add(item, pair))
-		goto fail;
-
-	pair.key = cbor_move(cbor_build_uint8(3));
-	pair.value = cbor_move(cbor_build_negint8(-COSE_EDDSA - 1));
-	if (!cbor_map_add(item, pair))
-		goto fail;
-
-	pair.key = cbor_move(cbor_build_negint8(0));
-	pair.value = cbor_move(cbor_build_uint8(6));
-	if (!cbor_map_add(item, pair))
-		goto fail;
-
-	pair.key = cbor_move(cbor_build_negint8(1));
-	pair.value = cbor_move(cbor_build_bytestring(pk->x, sizeof(pk->x)));
-	if (!cbor_map_add(item, pair))
-		goto fail;
-
-	return (item);
-fail:
-	if (item != NULL)
-		cbor_decref(&item);
-
-	return (NULL);
 }
 
 eddsa_pk_t *
@@ -178,14 +149,6 @@ eddsa_pk_from_ptr(eddsa_pk_t *pk, const void *ptr, size_t len)
 	return (FIDO_OK);
 }
 
-int
-eddsa_pk_set_x(eddsa_pk_t *pk, const unsigned char *x)
-{
-	memcpy(pk->x, x, sizeof(pk->x));
-
-	return (0);
-}
-
 EVP_PKEY *
 eddsa_pk_to_EVP_PKEY(const eddsa_pk_t *k)
 {
@@ -193,7 +156,7 @@ eddsa_pk_to_EVP_PKEY(const eddsa_pk_t *k)
 
 	if ((pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, k->x,
 	    sizeof(k->x))) == NULL)
-		log_debug("%s: EVP_PKEY_new_raw_public_key", __func__);
+		fido_log_debug("%s: EVP_PKEY_new_raw_public_key", __func__);
 
 	return (pkey);
 }
@@ -201,8 +164,11 @@ eddsa_pk_to_EVP_PKEY(const eddsa_pk_t *k)
 int
 eddsa_pk_from_EVP_PKEY(eddsa_pk_t *pk, const EVP_PKEY *pkey)
 {
-	size_t len = sizeof(pk->x);
+	size_t len = 0;
 
+	if (EVP_PKEY_get_raw_public_key(pkey, NULL, &len) != 1 ||
+	    len != sizeof(pk->x))
+		return (FIDO_ERR_INTERNAL);
 	if (EVP_PKEY_get_raw_public_key(pkey, pk->x, &len) != 1 ||
 	    len != sizeof(pk->x))
 		return (FIDO_ERR_INTERNAL);

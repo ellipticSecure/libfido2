@@ -12,20 +12,22 @@
  * $ echo user name >> cred_param
  * $ dd if=/dev/urandom bs=1 count=32 | base64 >> cred_param
  * $ fido2-cred -M -i cred_param /dev/hidraw5 | fido2-cred -V -o cred
- */ 
+ */
 
+#include <fido.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "../openbsd-compat/openbsd-compat.h"
 #include "extern.h"
 
 void
 usage(void)
 {
 	fprintf(stderr,
-"usage: fido2-cred -M [-dqruv] [-i input_file] [-o output_file] device [type]\n"
-"       fido2-cred -V [-dv] [-i input_file] [-o output_file] [type]\n"
+"usage: fido2-cred -M [-dhqruv] [-c cred_protect] [-i input_file] [-o output_file] device [type]\n"
+"       fido2-cred -V [-dhv] [-c cred_protect] [-i input_file] [-o output_file] [type]\n"
 	);
 
 	exit(1);

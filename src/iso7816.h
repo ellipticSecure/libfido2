@@ -7,7 +7,14 @@
 #ifndef _ISO7816_H
 #define _ISO7816_H
 
+#include <stdint.h>
+#include <stdlib.h>
+
 #include "packed.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
 PACKED_TYPE(iso7816_header_t,
 struct iso7816_header {
@@ -29,10 +36,14 @@ struct iso7816_apdu {
 	uint8_t           payload[];
 })
 
-iso7816_apdu_t *	iso7816_new(uint8_t, uint8_t, uint16_t);
-void			iso7816_free(iso7816_apdu_t **);
-int			iso7816_add(iso7816_apdu_t *, const void *, size_t);
-const unsigned char *	iso7816_ptr(const iso7816_apdu_t *);
-size_t			iso7816_len(const iso7816_apdu_t *);
+const unsigned char *iso7816_ptr(const iso7816_apdu_t *);
+int iso7816_add(iso7816_apdu_t *, const void *, size_t);
+iso7816_apdu_t *iso7816_new(uint8_t, uint8_t, uint16_t);
+size_t iso7816_len(const iso7816_apdu_t *);
+void iso7816_free(iso7816_apdu_t **);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif /* __cplusplus */
 
 #endif /* !_ISO7816_H */

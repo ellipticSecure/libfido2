@@ -18,6 +18,7 @@
 #if defined(__APPLE__) && !defined(HAVE_ENDIAN_H)
 #include <libkern/OSByteOrder.h>
 #define be16toh(x) OSSwapBigToHostInt16((x))
+#define htobe16(x) OSSwapHostToBigInt16((x))
 #define be32toh(x) OSSwapBigToHostInt32((x))
 #endif /* __APPLE__ && !HAVE_ENDIAN_H */
 
@@ -27,8 +28,13 @@
 #include <sys/param.h>
 #endif
 #define be16toh(x) ntohs((x))
+#define htobe16(x) htons((x))
 #define be32toh(x) ntohl((x))
 #endif /* _WIN32 && !HAVE_ENDIAN_H */
+
+#if defined(__FreeBSD__) && !defined(HAVE_ENDIAN_H)
+#include <sys/endian.h>
+#endif
 
 #include <stdlib.h>
 
@@ -78,5 +84,12 @@ int timingsafe_bcmp(const void *, const void *, size_t);
 #else
 #include <unistd.h>
 #endif
+
+#if !defined(HAVE_GETLINE)
+#include <stdio.h>
+ssize_t getline(char **, size_t *, FILE *);
+#endif
+
+#include "time.h"
 
 #endif /* !_OPENBSD_COMPAT_H */

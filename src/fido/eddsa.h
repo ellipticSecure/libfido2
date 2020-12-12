@@ -12,6 +12,16 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#ifdef _FIDO_INTERNAL
+#include "types.h"
+#else
+#include <fido.h>
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
+
 eddsa_pk_t *eddsa_pk_new(void);
 void eddsa_pk_free(eddsa_pk_t **);
 EVP_PKEY *eddsa_pk_to_EVP_PKEY(const eddsa_pk_t *);
@@ -20,7 +30,6 @@ int eddsa_pk_from_EVP_PKEY(eddsa_pk_t *, const EVP_PKEY *);
 int eddsa_pk_from_ptr(eddsa_pk_t *, const void *, size_t);
 
 #ifdef _FIDO_INTERNAL
-int eddsa_pk_set_x(eddsa_pk_t *, const unsigned char *);
 
 #if defined(LIBRESSL_VERSION_NUMBER) || OPENSSL_VERSION_NUMBER < 0x10101000L
 #define EVP_PKEY_ED25519 EVP_PKEY_NONE
@@ -37,5 +46,9 @@ void EVP_MD_CTX_free(EVP_MD_CTX *);
 #endif
 
 #endif /* _FIDO_INTERNAL */
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif /* __cplusplus */
 
 #endif /* !_FIDO_EDDSA_H */

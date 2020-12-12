@@ -2,7 +2,7 @@
 .\" Use of this source code is governed by a BSD-style
 .\" license that can be found in the LICENSE file.
 .\"
-.Dd $Mdocdate: June 14 2018 $
+.Dd $Mdocdate: November 5 2019 $
 .Dt FIDO2-ASSERT 1
 .Os
 .Sh NAME
@@ -11,13 +11,14 @@
 .Sh SYNOPSIS
 .Nm
 .Fl G
-.Op Fl dpruv
+.Op Fl dhpruv
+.Op Fl t Ar option
 .Op Fl i Ar input_file
 .Op Fl o Ar output_file
 .Ar device
 .Nm
 .Fl V
-.Op Fl dpv
+.Op Fl dhpv
 .Op Fl i Ar input_file
 .Ar key_file
 .Op Ar type
@@ -64,14 +65,21 @@ where
 .Ar type
 may be
 .Em es256
-(denoting ECDSA over NIST P-256 with SHA-256) or
+(denoting ECDSA over NIST P-256 with SHA-256),
 .Em rs256
-(denoting 2048-bit RSA with PKCS#1.5 padding and SHA-256).
+(denoting 2048-bit RSA with PKCS#1.5 padding and SHA-256), or
+.Em eddsa
+(denoting EDDSA over Curve25519 with SHA-512).
 If
 .Ar type
 is not specified,
 .Em es256
 is assumed.
+.It Fl h
+If obtaining an assertion, enable the FIDO2 hmac-secret
+extension.
+If verifying an assertion, check whether the extension data bit was
+signed by the authenticator.
 .It Fl d
 Causes
 .Nm
@@ -103,6 +111,29 @@ is specified,
 .Nm
 will not expect a credential id in its input, and may output
 multiple assertions.
+.It Fl t Ar option
+Toggles a key/value
+.Ar option ,
+where
+.Ar option
+is a string of the form
+.Dq key=value .
+The options supported at present are:
+.Bl -tag -width Ds
+.It Cm up Ns = Ns Ar true|false
+Asks the authenticator for user presence to be enabled or disabled.
+.It Cm uv Ns = Ns Ar true|false
+Asks the authenticator for user verification to be enabled or
+disabled.
+.It Cm pin Ns = Ns Ar true|false
+Tells
+.Nm
+whether to prompt for a PIN and request user verification.
+.El
+.Pp
+The
+.Fl t
+option may be specified multiple times.
 .It Fl u
 Obtain an assertion using U2F.
 By default,
@@ -110,7 +141,12 @@ By default,
 will use FIDO2 if supported by the authenticator, and fallback to
 U2F otherwise.
 .It Fl v
-If obtaining an assertion, prompt the user for a PIN and request user verification from the authenticator.
+If obtaining an assertion, prompt the user for a PIN and request
+user verification from the authenticator.
+If verifying an assertion, check whether the user verification bit
+was signed by the authenticator.
+.El
+.Pp
 If a
 .Em tty
 is available,
@@ -119,9 +155,6 @@ will use it to obtain the PIN.
 Otherwise,
 .Em stdin
 is used.
-If verifying an assertion, check whether the user verification bit
-was signed by the authenticator.
-.El
 .Sh INPUT FORMAT
 The input of
 .Nm
@@ -132,13 +165,16 @@ When obtaining an assertion,
 .Nm
 expects its input to consist of:
 .Pp
-.Bl -enum -offset indent -compact                                   
+.Bl -enum -offset indent -compact
 .It
 client data hash (base64 blob);
 .It
 relying party id (UTF-8 string);
 .It
 credential id, if credential not resident (base64 blob);
+.It
+hmac salt, if the FIDO2 hmac-secret extension is enabled
+(base64 blob);
 .El
 .Pp
 When verifying an assertion,
@@ -180,6 +216,9 @@ authenticator data (base64 blob);
 assertion signature (base64 blob);
 .It
 user id, if credential resident (base64 blob);
+.It
+hmac secret, if the FIDO2 hmac-secret extension is enabled
+(base64 blob);
 .El
 .Pp
 When verifying an assertion,

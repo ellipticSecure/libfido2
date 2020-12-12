@@ -4,7 +4,7 @@
  * license that can be found in the LICENSE file.
  */
 
-#include <stdbool.h>
+#include <fido.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,13 +12,11 @@
 #include <unistd.h>
 #endif
 
-#include <fido.h>
-
 #include "../openbsd-compat/openbsd-compat.h"
 #include "extern.h"
 
 static fido_cred_t *
-prepare_cred(FILE *in_f, int type, bool rk, bool uv, bool debug)
+prepare_cred(FILE *in_f, int type, int flags)
 {
 	fido_cred_t *cred = NULL;
 	struct blob cdh;
@@ -42,11 +40,12 @@ prepare_cred(FILE *in_f, int type, bool rk, bool uv, bool debug)
 	r |= base64_read(in_f, &authdata);
 	r |= base64_read(in_f, &id);
 	r |= base64_read(in_f, &sig);
-	r |= base64_read(in_f, &x5c);
 	if (r < 0)
 		errx(1, "input error");
 
-	if (debug) {
+	(void)base64_read(in_f, &x5c);
+
+	if (flags & FLAG_DEBUG) {
 		fprintf(stderr, "client data hash:\n");
 		xxd(cdh.ptr, cdh.len);
 		fprintf(stderr, "relying party id: %s\n", rpid);
@@ -70,11 +69,24 @@ prepare_cred(FILE *in_f, int type, bool rk, bool uv, bool debug)
 	    (r = fido_cred_set_rp(cred, rpid, NULL)) != FIDO_OK ||
 	    (r = fido_cred_set_authdata(cred, authdata.ptr,
 	    authdata.len)) != FIDO_OK ||
-	    (r = fido_cred_set_options(cred, rk, uv)) != FIDO_OK ||
-	    (r = fido_cred_set_x509(cred, x5c.ptr, x5c.len)) != FIDO_OK ||
 	    (r = fido_cred_set_sig(cred, sig.ptr, sig.len)) != FIDO_OK ||
 	    (r = fido_cred_set_fmt(cred, fmt)) != FIDO_OK)
 		errx(1, "fido_cred_set: %s", fido_strerr(r));
+
+	if (x5c.ptr != NULL) {
+		if ((r = fido_cred_set_x509(cred, x5c.ptr, x5c.len)) != FIDO_OK)
+			errx(1, "fido_cred_set_x509: %s", fido_strerr(r));
+	}
+
+	if (flags & FLAG_UV) {
+		if ((r = fido_cred_set_uv(cred, FIDO_OPT_TRUE)) != FIDO_OK)
+			errx(1, "fido_cred_set_uv: %s", fido_strerr(r));
+	}
+	if (flags & FLAG_HMAC) {
+		if ((r = fido_cred_set_extensions(cred,
+		    FIDO_EXT_HMAC_SECRET)) != FIDO_OK)
+			errx(1, "fido_cred_set_extensions: %s", fido_strerr(r));
+	}
 
 	free(cdh.ptr);
 	free(authdata.ptr);
@@ -87,34 +99,6 @@ prepare_cred(FILE *in_f, int type, bool rk, bool uv, bool debug)
 	return (cred);
 }
 
-static void
-print_cred(FILE *out_f, int type, const fido_cred_t *cred)
-{
-	char *id;
-	int r;
-
-	r = base64_encode(fido_cred_id_ptr(cred), fido_cred_id_len(cred), &id);
-	if (r < 0)
-		errx(1, "output error");
-
-	fprintf(out_f, "%s\n", id);
-
-	if (type == COSE_ES256) {
-		write_ec_pubkey(out_f, fido_cred_pubkey_ptr(cred),
-		    fido_cred_pubkey_len(cred));
-	} else if (type == COSE_RS256) {
-		write_rsa_pubkey(out_f, fido_cred_pubkey_ptr(cred),
-		    fido_cred_pubkey_len(cred));
-	} else if (type == COSE_EDDSA) {
-		write_eddsa_pubkey(out_f, fido_cred_pubkey_ptr(cred),
-		    fido_cred_pubkey_len(cred));
-	} else {
-		errx(1, "print_cred: unknown type");
-	}
-
-	free(id);
-}
-
 int
 cred_verify(int argc, char **argv)
 {
@@ -123,17 +107,23 @@ cred_verify(int argc, char **argv)
 	char *out_path = NULL;
 	FILE *in_f = NULL;
 	FILE *out_f = NULL;
-	bool rk = false;
-	bool uv = false;
-	bool debug = false;
 	int type = COSE_ES256;
+	int flags = 0;
+	int cred_prot = -1;
 	int ch;
 	int r;
 
-	while ((ch = getopt(argc, argv, "di:o:v")) != -1) {
+	while ((ch = getopt(argc, argv, "c:dhi:o:v")) != -1) {
 		switch (ch) {
+		case 'c':
+			if ((cred_prot = base10(optarg)) < 0)
+				errx(1, "-c: invalid argument '%s'", optarg);
+			break;
 		case 'd':
-			debug = true;
+			flags |= FLAG_DEBUG;
+			break;
+		case 'h':
+			flags |= FLAG_HMAC;
 			break;
 		case 'i':
 			in_path = optarg;
@@ -142,7 +132,7 @@ cred_verify(int argc, char **argv)
 			out_path = optarg;
 			break;
 		case 'v':
-			uv = true;
+			flags |= FLAG_UV;
 			break;
 		default:
 			usage();
@@ -158,21 +148,26 @@ cred_verify(int argc, char **argv)
 	in_f = open_read(in_path);
 	out_f = open_write(out_path);
 
-	if (argc > 0) {
-		if (strcmp(argv[0], "es256") == 0)
-			type = COSE_ES256;
-		else if (strcmp(argv[0], "rs256") == 0)
-			type = COSE_RS256;
-		else if (strcmp(argv[0], "eddsa") == 0)
-			type = COSE_EDDSA;
-		else
-			errx(1, "unknown type %s", argv[0]);
+	if (argc > 0 && cose_type(argv[0], &type) < 0)
+		errx(1, "unknown type %s", argv[0]);
+
+	fido_init((flags & FLAG_DEBUG) ? FIDO_DEBUG : 0);
+	cred = prepare_cred(in_f, type, flags);
+
+	if (cred_prot > 0) {
+		r = fido_cred_set_prot(cred, cred_prot);
+		if (r != FIDO_OK) {
+			errx(1, "fido_cred_set_prot: %s", fido_strerr(r));
+		}
 	}
 
-	fido_init(debug ? FIDO_DEBUG : 0);
-	cred = prepare_cred(in_f, type, rk, uv, debug);
-	if ((r = fido_cred_verify(cred)) != FIDO_OK)
-		errx(1, "fido_cred_verify: %s", fido_strerr(r));
+	if (fido_cred_x5c_ptr(cred) == NULL) {
+		if ((r = fido_cred_verify_self(cred)) != FIDO_OK)
+			errx(1, "fido_cred_verify_self: %s", fido_strerr(r));
+	} else {
+		if ((r = fido_cred_verify(cred)) != FIDO_OK)
+			errx(1, "fido_cred_verify: %s", fido_strerr(r));
+	}
 
 	print_cred(out_f, type, cred);
 	fido_cred_free(&cred);

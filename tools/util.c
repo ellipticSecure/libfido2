@@ -11,19 +11,38 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 
-#include <fcntl.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include <fido.h>
 #include <fido/es256.h>
 #include <fido/rs256.h>
 #include <fido/eddsa.h>
 
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "../openbsd-compat/openbsd-compat.h"
+#ifdef _MSC_VER
+#include "../openbsd-compat/posix_win.h"
+#endif
+
 #include "extern.h"
+
+void
+read_pin(const char *path, char *buf, size_t len)
+{
+	char prompt[1024];
+	int r;
+
+	r = snprintf(prompt, sizeof(prompt), "Enter PIN for %s: ", path);
+	if (r < 0 || (size_t)r >= sizeof(prompt))
+		errx(1, "snprintf");
+	if (!readpassphrase(prompt, buf, len, RPP_ECHO_OFF))
+		errx(1, "readpassphrase");
+}
 
 FILE *
 open_write(const char *file)
@@ -59,6 +78,25 @@ open_read(const char *file)
 		err(1, "fdopen %s", file);
 
 	return (f);
+}
+
+int
+base10(const char *str)
+{
+	char *ep;
+	long long ll;
+
+	ll = strtoll(str, &ep, 10);
+	if (str == ep || *ep != '\0')
+		return (-1);
+	else if (ll == LLONG_MIN && errno == ERANGE)
+		return (-1);
+	else if (ll == LLONG_MAX && errno == ERANGE)
+		return (-1);
+	else if (ll < 0 || ll > INT_MAX)
+		return (-1);
+
+	return ((int)ll);
 }
 
 void
@@ -316,4 +354,79 @@ fail:
 	}
 
 	return (ok);
+}
+
+void
+print_cred(FILE *out_f, int type, const fido_cred_t *cred)
+{
+	char *id;
+	int r;
+
+	r = base64_encode(fido_cred_id_ptr(cred), fido_cred_id_len(cred), &id);
+	if (r < 0)
+		errx(1, "output error");
+
+	fprintf(out_f, "%s\n", id);
+
+	if (type == COSE_ES256) {
+		write_ec_pubkey(out_f, fido_cred_pubkey_ptr(cred),
+		    fido_cred_pubkey_len(cred));
+	} else if (type == COSE_RS256) {
+		write_rsa_pubkey(out_f, fido_cred_pubkey_ptr(cred),
+		    fido_cred_pubkey_len(cred));
+	} else if (type == COSE_EDDSA) {
+		write_eddsa_pubkey(out_f, fido_cred_pubkey_ptr(cred),
+		    fido_cred_pubkey_len(cred));
+	} else {
+		errx(1, "print_cred: unknown type");
+	}
+
+	free(id);
+}
+
+int
+cose_type(const char *str, int *type)
+{
+	if (strcmp(str, "es256") == 0)
+		*type = COSE_ES256;
+	else if (strcmp(str, "rs256") == 0)
+		*type = COSE_RS256;
+	else if (strcmp(str, "eddsa") == 0)
+		*type = COSE_EDDSA;
+	else {
+		*type = 0;
+		return (-1);
+	}
+
+	return (0);
+}
+
+const char *
+cose_string(int type)
+{
+	switch (type) {
+	case COSE_EDDSA:
+		return ("eddsa");
+	case COSE_ES256:
+		return ("es256");
+	case COSE_RS256:
+		return ("rs256");
+	default:
+		return ("unknown");
+	}
+}
+
+const char *
+prot_string(int prot)
+{
+	switch (prot) {
+	case FIDO_CRED_PROT_UV_OPTIONAL:
+		return ("uvopt");
+	case FIDO_CRED_PROT_UV_OPTIONAL_WITH_ID:
+		return ("uvopt+id");
+	case FIDO_CRED_PROT_UV_REQUIRED:
+		return ("uvreq");
+	default:
+		return ("unknown");
+	}
 }

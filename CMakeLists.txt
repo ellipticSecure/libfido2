@@ -10,7 +10,10 @@ cmake_minimum_required(VERSION 3.0)
 
 include(CheckCCompilerFlag)
 include(CheckFunctionExists)
+include(CheckLibraryExists)
+include(CheckSymbolExists)
 include(CheckIncludeFiles)
+include(CheckTypeSize)
 include(GNUInstallDirs)
 
 set(CMAKE_COLOR_MAKEFILE off)
@@ -18,7 +21,7 @@ set(CMAKE_VERBOSE_MAKEFILE on)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(FIDO_MAJOR "1")
-set(FIDO_MINOR "1")
+set(FIDO_MINOR "5")
 set(FIDO_PATCH "0")
 set(FIDO_VERSION ${FIDO_MAJOR}.${FIDO_MINOR}.${FIDO_PATCH})
 
@@ -26,8 +29,18 @@ add_definitions(-D_FIDO_MAJOR=${FIDO_MAJOR})
 add_definitions(-D_FIDO_MINOR=${FIDO_MINOR})
 add_definitions(-D_FIDO_PATCH=${FIDO_PATCH})
 
+if(CYGWIN OR MSYS)
+	set(WIN32 1)
+	add_definitions(-DWINVER=0x0a00)
+endif()
+
 if(WIN32)
-	add_definitions(-DWIN32_LEAN_AND_MEAN)
+	add_definitions(-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0600)
+endif()
+
+if(APPLE)
+	set(CMAKE_INSTALL_NAME_DIR
+	    "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 endif()
 
 if(MSVC)
@@ -38,10 +51,12 @@ if(MSVC)
 		    "under msvc")
 	endif()
 	set(CBOR_LIBRARIES cbor)
-	set(CRYPTO_LIBRARIES crypto-45)
+	set(CRYPTO_LIBRARIES crypto-46)
 	set(MSVC_DISABLED_WARNINGS_LIST
 		"C4200" # nonstandard extension used: zero-sized array in
 			# struct/union;
+		"C4204" # nonstandard extension used: non-constant aggregate
+			# initializer;
 		"C4706" # assignment within conditional expression;
 		"C4996" # The POSIX name for this item is deprecated. Instead,
 			# use the ISO C and C++ conformant name
@@ -49,15 +64,15 @@ if(MSVC)
 	# The construction in the following 3 lines was taken from LibreSSL's
 	# CMakeLists.txt.
 	string(REPLACE "C" " -wd" MSVC_DISABLED_WARNINGS_STR
-		${MSVC_DISABLED_WARNINGS_LIST})
+	    ${MSVC_DISABLED_WARNINGS_LIST})
 	string(REGEX REPLACE "[/-]W[1234][ ]?" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -MP -W4 ${MSVC_DISABLED_WARNINGS_STR}")
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -MP -W4 -WX ${MSVC_DISABLED_WARNINGS_STR}")
 	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Z7")
 	set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi")
 else()
 	include(FindPkgConfig)
 	pkg_search_module(CBOR libcbor)
-	pkg_search_module(CRYPTO libcrypto REQUIRED)
+	pkg_search_module(CRYPTO libcrypto)
 
 	# XXX workaround libcbor's missing .pc file
 	if(NOT CBOR_FOUND)
@@ -68,17 +83,47 @@ else()
 		set(CBOR_LIBRARIES "cbor")
 	endif()
 
+	# XXX workaround libcrypto's missing .pc file
+	if(NOT CRYPTO_FOUND)
+		check_include_files(openssl/opensslv.h HAVE_OPENSSLV_H)
+		if(NOT HAVE_OPENSSLV_H)
+			message(FATAL_ERROR "could not find crypto header files")
+		endif()
+		set(CRYPTO_LIBRARIES "crypto")
+	endif()
+
 	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 		pkg_search_module(UDEV libudev REQUIRED)
 		set(UDEV_NAME "udev")
+		include_directories(${UDEV_INCLUDE_DIRS})
+		link_directories(${UDEV_LIBRARY_DIRS})
 		# Define be32toh().
 		add_definitions(-D_GNU_SOURCE)
+		# If using hidapi, use hidapi-hidraw.
+		set(HIDAPI_SUFFIX -hidraw)
+		# Look for clock_gettime in librt.
+		check_library_exists(rt clock_gettime "time.h" HAVE_CLOCK_GETTIME)
+		if(HAVE_CLOCK_GETTIME)
+			set(BASE_LIBRARIES ${BASE_LIBRARIES} rt)
+			add_definitions(-DHAVE_CLOCK_GETTIME)
+		endif()
 	endif()
 
 	if(MINGW)
 		# MinGW is stuck with a flavour of C89.
 		add_definitions(-DFIDO_NO_DIAGNOSTIC)
 		add_definitions(-DWC_ERR_INVALID_CHARS=0x80)
+		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-parameter")
+	endif()
+
+	if(USE_HIDAPI)
+		add_definitions(-DUSE_HIDAPI)
+		pkg_search_module(HIDAPI hidapi${HIDAPI_SUFFIX} REQUIRED)
+		if(HIDAPI_FOUND)
+			include_directories(${HIDAPI_INCLUDE_DIRS})
+			link_directories(${HIDAPI_LIBRARY_DIRS})
+			set(HIDAPI_LIBRARIES hidapi${HIDAPI_SUFFIX})
+		endif()
 	endif()
 
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
@@ -90,36 +135,23 @@ else()
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wbad-function-cast")
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pedantic")
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pedantic-errors")
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all")
+	check_c_compiler_flag("-fstack-protector-all" HAVE_STACK_PROTECTOR_ALL)
+	if(HAVE_STACK_PROTECTOR_ALL)
+		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all")
+	endif()
+
+	add_definitions(-D_DEFAULT_SOURCE)
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
 
 	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g2")
 	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fno-omit-frame-pointer")
 
 	if(FUZZ)
-		add_definitions(-DFIDO_FUZZ)
-		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined")
-
-		if(AFL)
-			set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize-trap=undefined")
-		endif()
-
 		if(LIBFUZZER)
+			set(FUZZ_LDFLAGS "-fsanitize=fuzzer")
 			set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=fuzzer-no-link")
 		endif()
-	endif()
-
-	if(ASAN)
-		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address,leak")
-	endif()
-
-	if(MSAN)
-		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=memory")
-		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize-memory-track-origins")
-	endif()
-
-	if(COVERAGE)
-		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-instr-generate -fcoverage-mapping")
+		add_definitions(-DFIDO_FUZZ)
 	endif()
 endif()
 
@@ -133,6 +165,17 @@ endif()
 if(CMAKE_COMPILER_IS_GNUCC)
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-result")
 endif()
+
+# Decide which keyword to use for thread-local storage.
+if(CMAKE_COMPILER_IS_GNUCC OR
+   CMAKE_C_COMPILER_ID STREQUAL "Clang" OR
+   CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+	set(TLS "__thread")
+elseif(WIN32)
+	set(TLS "__declspec(thread)")
+endif()
+
+add_definitions(-DTLS=${TLS})
 
 # endian.h
 check_include_files(endian.h HAVE_ENDIAN_H)
@@ -150,6 +193,18 @@ endif()
 check_include_files(unistd.h HAVE_UNISTD_H)
 if(HAVE_UNISTD_H)
 	add_definitions(-DHAVE_UNISTD_H)
+endif()
+
+# signal.h
+check_include_files(signal.h HAVE_SIGNAL_H)
+if(HAVE_SIGNAL_H)
+	add_definitions(-DHAVE_SIGNAL_H)
+endif()
+
+# sys/random.h
+check_include_files(sys/random.h HAVE_SYS_RANDOM_H)
+if(HAVE_SYS_RANDOM_H)
+	add_definitions(-DHAVE_SYS_RANDOM_H)
 endif()
 
 # strlcpy
@@ -214,6 +269,12 @@ if(HAVE_READPASSPHRASE)
 	add_definitions(-DHAVE_READPASSPHRASE)
 endif()
 
+# getline
+check_function_exists(getline HAVE_GETLINE)
+if(HAVE_GETLINE)
+	add_definitions(-DHAVE_GETLINE)
+endif()
+
 # getopt
 check_function_exists(getopt HAVE_GETOPT)
 if(HAVE_GETOPT)
@@ -228,15 +289,61 @@ else()
 	endif()
 endif()
 
+# usable sigaction
+set(CMAKE_EXTRA_INCLUDE_FILES signal.h)
+check_function_exists(sigaction HAVE_SIGACTION)
+check_type_size("sig_atomic_t" HAVE_SIG_ATOMIC_T)
+if(HAVE_SIGACTION AND (NOT HAVE_SIG_ATOMIC_T STREQUAL ""))
+	add_definitions(-DSIGNAL_EXAMPLE)
+endif()
+set(CMAKE_EXTRA_INCLUDE_FILES)
+
+# arc4random_buf
+check_function_exists(arc4random_buf HAVE_ARC4RANDOM_BUF)
+if(HAVE_ARC4RANDOM_BUF)
+	add_definitions(-DHAVE_ARC4RANDOM_BUF)
+endif()
+
+# getrandom
+check_function_exists(getrandom HAVE_GETRANDOM)
+if(HAVE_GETRANDOM)
+	add_definitions(-DHAVE_GETRANDOM)
+endif()
+
+# /dev/urandom
+if(UNIX)
+	add_definitions(-DHAVE_DEV_URANDOM)
+endif()
+
+# clock_gettime
+if(NOT HAVE_CLOCK_GETTIME)
+	check_function_exists(clock_gettime HAVE_CLOCK_GETTIME)
+	if(HAVE_CLOCK_GETTIME)
+		add_definitions(-DHAVE_CLOCK_GETTIME)
+	endif()
+endif()
+
+# timespecsub
+check_symbol_exists(timespecsub sys/time.h HAVE_TIMESPECSUB)
+if(HAVE_TIMESPECSUB)
+	add_definitions(-DHAVE_TIMESPECSUB)
+endif()
+
 # export list
-if(CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+if(APPLE AND (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR
+   CMAKE_C_COMPILER_ID STREQUAL "AppleClang"))
 	# clang + lld
 	string(CONCAT CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS}
 	    " -exported_symbols_list ${CMAKE_CURRENT_SOURCE_DIR}/src/export.llvm")
 elseif(NOT MSVC)
 	# clang/gcc + gnu ld
-	string(CONCAT CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS}
-	    " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/export.gnu")
+	if(FUZZ)
+		string(CONCAT CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS}
+                    " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/fuzz/export.gnu")
+	else()
+		string(CONCAT CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS}
+                    " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/export.gnu")
+	endif()
 	if(NOT WIN32)
 		string(CONCAT CMAKE_SHARED_LINKER_FLAGS
 		    ${CMAKE_SHARED_LINKER_FLAGS}
@@ -244,10 +351,18 @@ elseif(NOT MSVC)
 		string(CONCAT CMAKE_EXE_LINKER_FLAGS
 		    ${CMAKE_EXE_LINKER_FLAGS}
 		    " -Wl,-z,noexecstack -Wl,-z,relro,-z,now")
+		if(FUZZ)
+			file(STRINGS fuzz/wrapped.sym WRAPPED_SYMBOLS)
+			foreach(s ${WRAPPED_SYMBOLS})
+				string(CONCAT CMAKE_SHARED_LINKER_FLAGS
+				    ${CMAKE_SHARED_LINKER_FLAGS}
+				    " -Wl,--wrap=${s}")
+			endforeach()
+		endif()
 	endif()
 else()
 	string(CONCAT CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS}
-		" /def:${CMAKE_CURRENT_SOURCE_DIR}/src/export.msvc")
+	    " /def:\"${CMAKE_CURRENT_SOURCE_DIR}/src/export.msvc\"")
 endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/src)
@@ -257,42 +372,49 @@ include_directories(${CRYPTO_INCLUDE_DIRS})
 link_directories(${CBOR_LIBRARY_DIRS})
 link_directories(${CRYPTO_LIBRARY_DIRS})
 
+message(STATUS "BASE_LIBRARIES: ${BASE_LIBRARIES}")
+message(STATUS "CBOR_INCLUDE_DIRS: ${CBOR_INCLUDE_DIRS}")
+message(STATUS "CBOR_LIBRARIES: ${CBOR_LIBRARIES}")
+message(STATUS "CBOR_LIBRARY_DIRS: ${CBOR_LIBRARY_DIRS}")
+message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 message(STATUS "CMAKE_C_COMPILER: ${CMAKE_C_COMPILER}")
 message(STATUS "CMAKE_C_COMPILER_ID: ${CMAKE_C_COMPILER_ID}")
-message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "CMAKE_INSTALL_LIBDIR: ${CMAKE_INSTALL_LIBDIR}")
-message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
-message(STATUS "CBOR_INCLUDE_DIRS: ${CBOR_INCLUDE_DIRS}")
-message(STATUS "CBOR_LIBRARY_DIRS: ${CBOR_LIBRARY_DIRS}")
-message(STATUS "CBOR_LIBRARIES: ${CBOR_LIBRARIES}")
+message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "CRYPTO_INCLUDE_DIRS: ${CRYPTO_INCLUDE_DIRS}")
-message(STATUS "CRYPTO_LIBRARY_DIRS: ${CRYPTO_LIBRARY_DIRS}")
 message(STATUS "CRYPTO_LIBRARIES: ${CRYPTO_LIBRARIES}")
-message(STATUS "UDEV_INCLUDE_DIRS: ${UDEV_INCLUDE_DIRS}")
-message(STATUS "UDEV_LIBRARY_DIRS: ${UDEV_LIBRARY_DIRS}")
-message(STATUS "UDEV_LIBRARIES: ${UDEV_LIBRARIES}")
-message(STATUS "UDEV_RULES_DIR: ${UDEV_RULES_DIR}")
-message(STATUS "VERSION: ${FIDO_MAJOR}.${FIDO_MINOR}.${FIDO_PATCH}")
+message(STATUS "CRYPTO_LIBRARY_DIRS: ${CRYPTO_LIBRARY_DIRS}")
+message(STATUS "FIDO_VERSION: ${FIDO_VERSION}")
 message(STATUS "FUZZ: ${FUZZ}")
-message(STATUS "AFL: ${AFL}")
+if(USE_HIDAPI)
+	message(STATUS "HIDAPI_INCLUDE_DIRS: ${HIDAPI_INCLUDE_DIRS}")
+	message(STATUS "HIDAPI_LIBRARIES: ${HIDAPI_LIBRARIES}")
+	message(STATUS "HIDAPI_LIBRARY_DIRS: ${HIDAPI_LIBRARY_DIRS}")
+endif()
 message(STATUS "LIBFUZZER: ${LIBFUZZER}")
-message(STATUS "ASAN: ${ASAN}")
-message(STATUS "MSAN: ${MSAN}")
-message(STATUS "COVERAGE: ${COVERAGE}")
+message(STATUS "TLS: ${TLS}")
+message(STATUS "UDEV_INCLUDE_DIRS: ${UDEV_INCLUDE_DIRS}")
+message(STATUS "UDEV_LIBRARIES: ${UDEV_LIBRARIES}")
+message(STATUS "UDEV_LIBRARY_DIRS: ${UDEV_LIBRARY_DIRS}")
+message(STATUS "UDEV_RULES_DIR: ${UDEV_RULES_DIR}")
+message(STATUS "USE_HIDAPI: ${USE_HIDAPI}")
 
 subdirs(src)
 subdirs(examples)
+subdirs(tools)
 subdirs(man)
 
 if(NOT WIN32)
 	if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-		if(NOT MSAN)
+		if(NOT LIBFUZZER AND NOT FUZZ)
 			subdirs(regress)
 		endif()
 	endif()
 	if(FUZZ)
 		subdirs(fuzz)
 	endif()
-	subdirs(tools)
-	subdirs(udev)
+
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		subdirs(udev)
+	endif()
 endif()

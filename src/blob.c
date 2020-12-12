@@ -24,13 +24,16 @@ fido_blob_set(fido_blob_t *b, const unsigned char *ptr, size_t len)
 
 	b->len = 0;
 
-	if (ptr == NULL || len == 0)
+	if (ptr == NULL || len == 0) {
+		fido_log_debug("%s: ptr=%p, len=%zu", __func__,
+		    (const void *)ptr, len);
 		return (-1);
+	}
 
-	b->ptr = malloc(len);
-
-	if (b->ptr == NULL)
+	if ((b->ptr = malloc(len)) == NULL) {
+		fido_log_debug("%s: malloc", __func__);
 		return (-1);
+	}
 
 	memcpy(b->ptr, ptr, len);
 	b->len = len;
@@ -58,7 +61,7 @@ fido_blob_free(fido_blob_t **bp)
 }
 
 void
-free_blob_array(fido_blob_array_t *array)
+fido_free_blob_array(fido_blob_array_t *array)
 {
 	if (array->ptr == NULL)
 		return;
@@ -84,7 +87,6 @@ fido_blob_encode(const fido_blob_t *b)
 		return (NULL);
 
 	return (cbor_build_bytestring(b->ptr, b->len));
-
 }
 
 int

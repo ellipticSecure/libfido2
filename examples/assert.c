@@ -14,12 +14,12 @@
 #include <unistd.h>
 #endif
 
-#include "../openbsd-compat/openbsd-compat.h"
-
 #include "fido.h"
 #include "fido/es256.h"
 #include "fido/rs256.h"
+#include "fido/eddsa.h"
 #include "extern.h"
+#include "../openbsd-compat/openbsd-compat.h"
 
 static const unsigned char cdh[32] = {
 	0xec, 0x8d, 0x8f, 0x78, 0x42, 0x4a, 0x2b, 0xb7,
@@ -31,9 +31,9 @@ static const unsigned char cdh[32] = {
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: assert [-t ecdsa|rsa] [-a cred_id] "
-	    "[-h hmac_secret] [-s hmac_salt] [-P pin] [-puv] <pubkey> "
-	    "<device>\n");
+	fprintf(stderr, "usage: assert [-t ecdsa|rsa|eddsa] [-a cred_id] "
+	    "[-h hmac_secret] [-s hmac_salt] [-P pin] [-T seconds] [-puv] "
+	    "<pubkey> <device>\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -45,13 +45,16 @@ verify_assert(int type, const unsigned char *authdata_ptr, size_t authdata_len,
 	fido_assert_t	*assert = NULL;
 	EC_KEY		*ec = NULL;
 	RSA		*rsa = NULL;
+	EVP_PKEY	*eddsa = NULL;
 	es256_pk_t	*es256_pk = NULL;
 	rs256_pk_t	*rs256_pk = NULL;
+	eddsa_pk_t	*eddsa_pk = NULL;
 	void		*pk;
 	int		 r;
 
 	/* credential pubkey */
-	if (type == COSE_ES256) {
+	switch (type) {
+	case COSE_ES256:
 		if ((ec = read_ec_pubkey(key)) == NULL)
 			errx(1, "read_ec_pubkey");
 
@@ -64,7 +67,9 @@ verify_assert(int type, const unsigned char *authdata_ptr, size_t authdata_len,
 		pk = es256_pk;
 		EC_KEY_free(ec);
 		ec = NULL;
-	} else {
+
+		break;
+	case COSE_RS256:
 		if ((rsa = read_rsa_pubkey(key)) == NULL)
 			errx(1, "read_rsa_pubkey");
 
@@ -77,6 +82,25 @@ verify_assert(int type, const unsigned char *authdata_ptr, size_t authdata_len,
 		pk = rs256_pk;
 		RSA_free(rsa);
 		rsa = NULL;
+
+		break;
+	case COSE_EDDSA:
+		if ((eddsa = read_eddsa_pubkey(key)) == NULL)
+			errx(1, "read_eddsa_pubkey");
+
+		if ((eddsa_pk = eddsa_pk_new()) == NULL)
+			errx(1, "eddsa_pk_new");
+
+		if (eddsa_pk_from_EVP_PKEY(eddsa_pk, eddsa) != FIDO_OK)
+			errx(1, "eddsa_pk_from_EVP_PKEY");
+
+		pk = eddsa_pk;
+		EVP_PKEY_free(eddsa);
+		eddsa = NULL;
+
+		break;
+	default:
+		errx(1, "unknown credential type %d", type);
 	}
 
 	if ((assert = fido_assert_new()) == NULL)
@@ -107,10 +131,13 @@ verify_assert(int type, const unsigned char *authdata_ptr, size_t authdata_len,
 		errx(1, "fido_assert_set_extensions: %s (0x%x)", fido_strerr(r),
 		    r);
 
-	/* options */
-	r = fido_assert_set_options(assert, up, uv);
-	if (r != FIDO_OK)
-		errx(1, "fido_assert_set_options: %s (0x%x)", fido_strerr(r), r);
+	/* user presence */
+	if (up && (r = fido_assert_set_up(assert, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_assert_set_up: %s (0x%x)", fido_strerr(r), r);
+
+	/* user verification */
+	if (uv && (r = fido_assert_set_uv(assert, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_assert_set_uv: %s (0x%x)", fido_strerr(r), r);
 
 	/* sig */
 	r = fido_assert_set_sig(assert, 0, sig_ptr, sig_len);
@@ -123,6 +150,7 @@ verify_assert(int type, const unsigned char *authdata_ptr, size_t authdata_len,
 
 	es256_pk_free(&es256_pk);
 	rs256_pk_free(&rs256_pk);
+	eddsa_pk_free(&eddsa_pk);
 
 	fido_assert_free(&assert);
 }
@@ -138,6 +166,7 @@ main(int argc, char **argv)
 	const char	*pin = NULL;
 	const char	*hmac_out = NULL;
 	unsigned char	*body = NULL;
+	long long	 seconds = 0;
 	size_t		 len;
 	int		 type = COSE_ES256;
 	int		 ext = 0;
@@ -147,11 +176,22 @@ main(int argc, char **argv)
 	if ((assert = fido_assert_new()) == NULL)
 		errx(1, "fido_assert_new");
 
-	while ((ch = getopt(argc, argv, "P:a:h:ps:t:uv")) != -1) {
+	while ((ch = getopt(argc, argv, "P:T:a:h:ps:t:uv")) != -1) {
 		switch (ch) {
 		case 'P':
 			pin = optarg;
 			break;
+		case 'T':
+#ifndef SIGNAL_EXAMPLE
+			(void)seconds;
+			errx(1, "-T not supported");
+#else
+			if (base10(optarg, &seconds) < 0)
+				errx(1, "base10: %s", optarg);
+			if (seconds <= 0 || seconds > 30)
+				errx(1, "-T: %s must be in (0,30]", optarg);
+			break;
+#endif
 		case 'a':
 			if (read_blob(optarg, &body, &len) < 0)
 				errx(1, "read_blob: %s", optarg);
@@ -184,6 +224,8 @@ main(int argc, char **argv)
 				type = COSE_ES256;
 			else if (strcmp(optarg, "rsa") == 0)
 				type = COSE_RS256;
+			else if (strcmp(optarg, "eddsa") == 0)
+				type = COSE_EDDSA;
 			else
 				errx(1, "unknown type %s", optarg);
 			break;
@@ -232,14 +274,31 @@ main(int argc, char **argv)
 		errx(1, "fido_assert_set_extensions: %s (0x%x)", fido_strerr(r),
 		    r);
 
-	/* options */
-	r = fido_assert_set_options(assert, up, uv);
-	if (r != FIDO_OK)
-		errx(1, "fido_assert_set_options: %s (0x%x)", fido_strerr(r), r);
+	/* user presence */
+	if (up && (r = fido_assert_set_up(assert, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_assert_set_up: %s (0x%x)", fido_strerr(r), r);
+
+	/* user verification */
+	if (uv && (r = fido_assert_set_uv(assert, FIDO_OPT_TRUE)) != FIDO_OK)
+		errx(1, "fido_assert_set_uv: %s (0x%x)", fido_strerr(r), r);
+
+#ifdef SIGNAL_EXAMPLE
+	prepare_signal_handler(SIGINT);
+	if (seconds) {
+		prepare_signal_handler(SIGALRM);
+		alarm((unsigned)seconds);
+	}
+#endif
 
 	r = fido_dev_get_assert(dev, assert, pin);
-	if (r != FIDO_OK)
+	if (r != FIDO_OK) {
+#ifdef SIGNAL_EXAMPLE
+		if (got_signal)
+			fido_dev_cancel(dev);
+#endif
 		errx(1, "fido_dev_get_assert: %s (0x%x)", fido_strerr(r), r);
+	}
+
 	r = fido_dev_close(dev);
 	if (r != FIDO_OK)
 		errx(1, "fido_dev_close: %s (0x%x)", fido_strerr(r), r);
@@ -249,6 +308,10 @@ main(int argc, char **argv)
 	if (fido_assert_count(assert) != 1)
 		errx(1, "fido_assert_count: %d signatures returned",
 		    (int)fido_assert_count(assert));
+
+	/* when verifying, pin implies uv */
+	if (pin)
+		uv = true;
 
 	verify_assert(type, fido_assert_authdata_ptr(assert, 0),
 	    fido_assert_authdata_len(assert, 0), fido_assert_sig_ptr(assert, 0),

@@ -4,15 +4,12 @@
  * license that can be found in the LICENSE file.
  */
 
-#include <openssl/ec.h>
-
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../openbsd-compat/openbsd-compat.h"
-
 #include "fido.h"
+#include "../openbsd-compat/openbsd-compat.h"
 
 int
 main(void)
@@ -33,8 +30,8 @@ main(void)
 		const fido_dev_info_t *di = fido_dev_info_ptr(devlist, i);
 		printf("%s: vendor=0x%04x, product=0x%04x (%s %s)\n",
 		    fido_dev_info_path(di),
-		    fido_dev_info_vendor(di),
-		    fido_dev_info_product(di),
+		    (uint16_t)fido_dev_info_vendor(di),
+		    (uint16_t)fido_dev_info_product(di),
 		    fido_dev_info_manufacturer_string(di),
 		    fido_dev_info_product_string(di));
 	}
