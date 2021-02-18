@@ -7,8 +7,10 @@
 #ifndef _FIDO_H
 #define _FIDO_H
 
+#ifdef USE_OPENSSL
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>

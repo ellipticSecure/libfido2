@@ -155,6 +155,10 @@ fido_dev_make_cred_rx(fido_dev_t *dev, fido_cred_t *cred, int ms)
 		return (FIDO_ERR_INVALID_CBOR);
 	}
 
+	cred->attobject.len = reply_len - 1;
+	cred->attobject.ptr = malloc(reply_len);
+	memcpy(cred->attobject.ptr, reply + 1, reply_len - 1);
+
 	return (FIDO_OK);
 }
 
@@ -510,6 +514,10 @@ fido_cred_reset_rx(fido_cred_t *cred)
 	fido_cred_clean_authdata(cred);
 	fido_cred_clean_x509(cred);
 	fido_cred_clean_sig(cred);
+
+    free(cred->attobject.ptr);
+    cred->attobject.ptr = NULL;
+    cred->attobject.len = 0;
 }
 
 void
